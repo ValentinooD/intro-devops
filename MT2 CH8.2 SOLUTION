@@ -1,0 +1,99 @@
+
+kubectl create namespace review
+kubectl config set-context --current --namespace=review
+Phase 2: The Database Tier
+Create the generic secret using strict Kubernetes --from-literal=k=v syntax.
+
+Bash
+kubectl create secret generic dbparams --from-literal=user=operator1 --from-literal=password=redhat123 --from-literal=database=quotesdb
+Because kubectl lacks a one-line command to attach storage to a Deployment, we generate the Persistent Volume Claim manually via standard input.
+
+Bash
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: lvms-vg1
+EOF
+Declare the database Deployment set to 0 replicas, pre-wired to the PVC we just created.
+
+Bash
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quotesdb
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: quotesdb
+  template:
+    metadata:
+      labels:
+        app: quotesdb
+    spec:
+      containers:
+        - name: mysql8
+          image: registry.ocp4.example.com:8443/rhel9/mysql-80:1-228
+          volumeMounts:
+            - name: db-data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: mysql-pvc
+EOF
+Inject the secret's key-value pairs into the Deployment environment, prepending the MYSQL_ prefix.
+
+Bash
+kubectl set env deployment/quotesdb --from=secret/dbparams --prefix=MYSQL_
+Turn the database on.
+
+Bash
+kubectl scale deployment/quotesdb --replicas=1
+Expose the database to the internal cluster network on the standard MySQL port.
+
+Bash
+kubectl expose deployment quotesdb --port=3306 --target-port=3306
+Phase 3: The Web UI Tier
+Create the frontend web server Deployment set to 0 replicas.
+
+Bash
+kubectl create deployment frontend --image=registry.ocp4.example.com:8443/redhattraining/famous-quotes:2-42 --replicas=0
+Inject the database secret into the frontend, telling Kubernetes to attach the QUOTES_ prefix.
+
+Bash
+kubectl set env deployment/frontend --from=secret/dbparams --prefix=QUOTES_
+Manually declare the final hardcoded environment variable pointing to the database Service.
+
+Bash
+kubectl set env deployment/frontend QUOTES_HOSTNAME=quotesdb
+Turn the frontend web server on.
+
+Bash
+kubectl scale deployment/frontend --replicas=1
+Expose the frontend pod to the internal cluster network on port 8000.
+
+Bash
+kubectl expose deployment frontend --port=8000 --target-port=8000
+Create an Ingress (the vanilla Kubernetes equivalent of an OpenShift Route) mapped to the exact requested URL.
+
+Bash
+kubectl create ingress frontend --rule="frontend-review.apps.ocp4.example.com/*=frontend:8000"
+Phase 4: Verification & Grading
+Force an imperative image rollout to the .237 tag to test your container upgrade path.
+
+Bash
+kubectl set image deployment/quotesdb mysql8=registry.ocp4.example.com:8443/rhel9/mysql-80:1-237
+Test the live public endpoint.
+
+Bash
+curl http://frontend-review.apps.ocp4.example.com
